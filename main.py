@@ -3,12 +3,12 @@ import mysql.connector
 
 app = Flask(__name__)
 
-# Database configuration
+# --- Database configuration ---
 db_config = {
     'host': 'localhost',
-    'user': 'your_user',
-    'password': 'your_password',
-    'database': 'your_database'
+    'user': 'your_user',        # Replace with your MySQL username
+    'password': 'your_password',# Replace with your MySQL password
+    'database': 'your_database' # Replace with your MySQL database
 }
 
 def get_db_connection():
@@ -18,42 +18,41 @@ def get_db_connection():
 @app.route('/feedback', methods=['POST'])
 def record_feedback():
     data = request.json
-    job_id = data.get('job_id')
     candidate_id = data.get('candidate_id')
     vote_type = data.get('vote_type')  # 'like' or 'dislike'
-    note = data.get('feedback_note', '')
 
-    if vote_type not in ['like', 'dislike']:
-        return jsonify({'error': 'Invalid vote type'}), 400
+    if not candidate_id or vote_type not in ['like', 'dislike']:
+        return jsonify({'error': 'Invalid candidate_id or vote_type'}), 400
 
-    liked_value = (vote_type == 'like')
+    liked_value = (vote_type == 'like')  # Convert 'like' to True, 'dislike' to False
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # 1. Insert or update JobCandidateViews
+        # 1. Update the liked field
         cursor.execute("""
-            INSERT INTO JobCandidateViews (job_id, candidate_id, shown_at, liked, feedback_note)
-            VALUES (%s, %s, NOW(), %s, %s)
-            ON DUPLICATE KEY UPDATE
-                liked = VALUES(liked),
-                feedback_note = VALUES(feedback_note)
-        """, (job_id, candidate_id, liked_value, note))
+            UPDATE JobCandidateViews
+            SET liked = %s
+            WHERE candidate_id = %s
+        """, (liked_value, candidate_id))
 
-        # 2. Update CandidateRelevanceCounter
+        if cursor.rowcount == 0:
+            return jsonify({'error': 'Candidate not found in JobCandidateViews'}), 404
+
+        # 2. Update CandidateRelevanceCounter safely
         if liked_value:
             cursor.execute("""
-                INSERT INTO CandidateRelevanceCounter (candidate_id, job_id, likes_count, dislikes_count)
-                VALUES (%s, %s, 1, 0)
-                ON DUPLICATE KEY UPDATE likes_count = likes_count + 1
-            """, (candidate_id, job_id))
+                UPDATE CandidateRelevanceCounter
+                SET likes_count = likes_count + 1
+                WHERE candidate_id = %s
+            """, (candidate_id,))
         else:
             cursor.execute("""
-                INSERT INTO CandidateRelevanceCounter (candidate_id, job_id, likes_count, dislikes_count)
-                VALUES (%s, %s, 0, 1)
-                ON DUPLICATE KEY UPDATE dislikes_count = dislikes_count + 1
-            """, (candidate_id, job_id))
+                UPDATE CandidateRelevanceCounter
+                SET dislikes_count = dislikes_count + 1
+                WHERE candidate_id = %s
+            """, (candidate_id,))
 
         conn.commit()
         return jsonify({'status': 'success'}), 200
@@ -68,27 +67,27 @@ def record_feedback():
 # --- Fetch Like/Dislike Counts ---
 @app.route('/feedback/count', methods=['GET'])
 def get_feedback_counts():
-    job_id = request.args.get('job_id')
     candidate_id = request.args.get('candidate_id')
 
-    if not job_id or not candidate_id:
-        return jsonify({'error': 'Missing job_id or candidate_id'}), 400
+    if not candidate_id:
+        return jsonify({'error': 'Missing candidate_id'}), 400
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT likes_count, dislikes_count
+            SELECT 
+                GREATEST(likes_count, 0) AS safe_likes, 
+                GREATEST(dislikes_count, 0) AS safe_dislikes
             FROM CandidateRelevanceCounter
-            WHERE job_id = %s AND candidate_id = %s
-        """, (job_id, candidate_id))
+            WHERE candidate_id = %s
+        """, (candidate_id,))
 
         result = cursor.fetchone()
         likes, dislikes = result if result else (0, 0)
 
         return jsonify({
-            'job_id': job_id,
             'candidate_id': candidate_id,
             'likes': likes,
             'dislikes': dislikes
@@ -101,5 +100,6 @@ def get_feedback_counts():
         cursor.close()
         conn.close()
 
+# --- Main ---
 if __name__ == '__main__':
     app.run(debug=True)
